@@ -1,0 +1,187 @@
+blueprint:
+  name: BJ ZLL Switch Rocker Configuration
+  description: "Individually configure the rockers of your Busch-Jaeger ZigBee Light Link switches in deCONZ. Supports on/off, dimming and scene activation."
+  domain: automation
+  input:
+    switch_event_id:
+      name: Switch Event ID
+      description: The event id of the switch (a.k.a the switch name). You can find out the event id by using developer tools -> events and subscribing to `deconz_event`.
+    rocker:
+      name: Rocker number
+      description: Depending on the BJ ZLL switch model the switch might have up to four rockers. You can select which rocker you would like to program through this automation.
+      default: 1 
+      selector:
+        number:
+          min: 1
+          max: 4
+    light:
+      name: Light
+      description: The light you want to control through the automation.
+      selector:
+        entity:
+          integration: deconz
+          domain: light
+    transition:
+      name: Transition Time
+      description: The transition time for the brightness change.
+      default: 4
+      selector:
+        number:
+          min: 1
+          max: 10
+    ignore_on_button:
+      name: Ignore On Button
+      description: Enable if you only want to ignore events from the right rocker. You can then handle short button presses on that button through your own custom automation for maximum flexibility.
+      default: false
+      selector:
+        boolean:
+    ignore_off_button:
+      name: Ignore Off Button
+      description: Enable if you only want to ignore events from the left rocker. You can then handle short button presses on that button through your own custom automation for maximum flexibility.
+      default: false
+      selector:
+        boolean:
+    on_scene:
+      name: On Scene
+      description: If you want to activate a scene with the right button of the rocker instead of simply calling `light.turn_on` you can reference the scene here.
+      default:
+      selector:
+        entity:
+          domain: scene
+
+variables:
+  rocker: !input rocker
+  transition: !input transition
+  light: !input light
+  on_scene: !input on_scene
+trigger_variables:
+  rocker: !input rocker
+  ignore_on_button: !input ignore_on_button
+  ignore_off_button: !input ignore_off_button
+trigger:
+  ##
+  # Events for dimming (LONG_PRESS_HOLD and LONG_PRESS_RELEASE for both left and right rocker buttons
+  ##
+  - platform: event
+    event_type: deconz_event
+    event_data:
+      id: !input switch_event_id
+      # Start long press left rocker
+      event: "{% if rocker == 1 %}1001{% elif rocker == 2 %}3001{% elif rocker == 3 %}5001{% else %}7001{% endif %}" 
+  - platform: event
+    event_type: deconz_event
+    event_data:
+      id: !input switch_event_id
+      # Stop long press left rocker
+      event: "{% if rocker == 1 %}1003{% elif rocker == 2 %}3003{% elif rocker == 3 %}5003{% else %}7003{% endif %}" 
+  - platform: event
+    event_type: deconz_event
+    event_data:
+      id: !input switch_event_id
+      # Start long press right rocker
+      event: "{% if rocker == 1 %}2001{% elif rocker == 2 %}4001{% elif rocker == 3 %}6001{% else %}8001{% endif %}" 
+  - platform: event
+    event_type: deconz_event
+    event_data:
+      id: !input switch_event_id
+      # Stop long press right rocker
+      event: "{% if rocker == 1 %}2003{% elif rocker == 2 %}4003{% elif rocker == 3 %}6003{% else %}8003{% endif %}"
+  ##
+  # Short-press events for on/off.
+  #
+  # Note: In case `ignore_off_button`/`ignore_on_button` is set, we don't want to subscribe to these button events.
+  # That's why we are using the dummy event "9999" in that case.
+  ##
+  - platform: event
+    event_type: deconz_event
+    event_data:
+      id: !input switch_event_id
+      # Short press left rocker
+      event: "{% if not ignore_off_button and rocker == 1 %}1002{% elif not ignore_off_button and rocker == 2 %}3002{% elif not ignore_off_button and rocker == 3 %}5002{% elif not ignore_off_button and rocker == 4 %}7002{% else %}9999{% endif %}"
+  - platform: event
+    event_type: deconz_event
+    event_data:
+      id: !input switch_event_id
+      # Short press right rocker
+      event: "{% if not ignore_on_button and rocker == 1 %}2002{% elif not ignore_on_button and rocker == 2 %}4002{% elif not ignore_on_button and rocker == 3 %}6002{% elif not ignore_on_button and rocker == 4 %}8002{% else %}9999{% endif %}"
+action:
+    - choose:
+      ##
+      # Handle DIM DOWN events (long-press left rocker button).
+      #
+      # We are asking the light to move to minimum brightness within `transition` time. As soon as the button is released the transition is stopped.
+      ##
+      - conditions:
+        - condition: template
+          value_template: '{{ trigger.event.data.event in (1001,3001,5001,7001) }}'
+        sequence:
+          - service: light.turn_on
+            data:
+              entity_id: '{{light}}'
+              brightness: 3
+              transition: "{{transition}}"
+
+      ##
+      # Handle DIM UP events (long-press right rocker button).
+      #
+      # We are asking the light to move to max brightness within `transition` time. As soon as the button is released the transition is stopped.
+      ##
+      - conditions:
+        - condition: template
+          value_template: '{{ trigger.event.data.event in (2001,4001,6001,8001) }}'
+        sequence:
+          - service: light.turn_on
+            data:
+              entity_id: '{{light}}'
+              brightness: 255
+              transition: "{{transition}}"
+
+      ##
+      # Handle DIM STOP events (release button after long-press event).
+      ##
+      - conditions:
+        - condition: template
+          value_template: '{{ trigger.event.data.event in (1003,2003,3003,4003,5003,6003,7003,8003) }}'
+        sequence:
+          - service: deconz.configure
+            data:
+              entity: '{{light}}'
+              # Set the `bri_inc` attribute through the REST API to stop any ongoing brightness transition.
+              # For groups and lights we need to write to a different endpoint. Note that the `is_deconz_group`
+              # is not good for detecting if it's a group because it does not work with rooms.
+              field: "{% if state_attr(light, 'all_on') != None %}/action{% else %}/state{% endif %}"
+              data: {"bri_inc": 0}
+
+
+      ##
+      # Handle OFF event (short-press left rocker button). 
+      ##
+      - conditions:
+        - condition: template
+          value_template: '{{ trigger.event.data.event in (1002,3002,5002,7002) }}'
+        sequence:
+          - service: light.turn_off
+            data:
+              entity_id: '{{light}}'
+
+      ##
+      # Handle ON event (short-press right rocker button) without activating scene.
+      ##
+      - conditions:
+        - condition: template
+          value_template: '{{ not on_scene and trigger.event.data.event in (2002,4002,6002,8002) }}'
+        sequence:
+          - service: light.turn_on
+            data:
+              entity_id: '{{light}}'
+
+      ##
+      # Handle ON event (short-press right rocker button) by activating scene. 
+      ##
+      - conditions:
+        - condition: template
+          value_template: '{{ on_scene and trigger.event.data.event in (2002,4002,6002,8002) }}'
+        sequence:
+          - service: scene.turn_on 
+            data:
+              entity_id: '{{on_scene}}'
